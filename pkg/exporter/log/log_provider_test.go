@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"testing"
 
-	journal "gitee.com/oschina/sense-agent/pkg/log"
+	journal "github.com/kwaisu/sense-agent/pkg/log"
 )
 
 func TestOtelExporter(t *testing.T) {
-	exporter, err := NewExporter("test", "gitee", "1.0", "127.0.0.1:4318")
+	exporter, err := NewExporter("test", "gitee", "1.0", "127.0.0.1:4318", "sense-agent")
 	if err != nil {
 		fmt.Println(err)
 	}

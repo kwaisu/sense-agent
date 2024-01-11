@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"time"
 
-	"gitee.com/oschina/sense-agent/pkg/log"
 	otel "github.com/agoda-com/opentelemetry-logs-go"
 	"github.com/agoda-com/opentelemetry-logs-go/exporters/otlp/otlplogs"
 	"github.com/agoda-com/opentelemetry-logs-go/exporters/otlp/otlplogs/otlplogshttp"
+	"github.com/kwaisu/sense-agent/pkg/log"
+	"k8s.io/klog/v2"
 
 	"github.com/agoda-com/opentelemetry-logs-go/logs"
 	sdk "github.com/agoda-com/opentelemetry-logs-go/sdk/logs"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
 type otelExporter struct {
@@ -24,7 +25,7 @@ type otelExporter struct {
 var _ Exporter = (*otelExporter)(nil)
 
 func NewExporter(machineId, hostname, version, endpoint, serviceName string) (Exporter, error) {
-	fmt.Print(endpoint)
+	klog.Info(endpoint)
 	if endpoint == "" {
 		return nil, fmt.Errorf("OpenTelemetry logs collector endpoint is nil")
 	}
@@ -46,7 +47,7 @@ func NewExporter(machineId, hostname, version, endpoint, serviceName string) (Ex
 		),
 	)
 	otel.SetLoggerProvider(loggerProvider)
-	logger := loggerProvider.Logger("sense-node-agent", logs.WithInstrumentationVersion(version))
+	logger := loggerProvider.Logger("sense-agent", logs.WithInstrumentationVersion(version))
 	return &otelExporter{log: logger}, nil
 }
 func (e *otelExporter) Export() ExportMessageF {
@@ -57,7 +58,7 @@ func (e *otelExporter) Export() ExportMessageF {
 			severityNumber := Level2OtelLogsLevel(severityText)
 			attributes := map2Attribute(msg.Fields)
 			meta := map2Attribute(msg.Meta)
-			fmt.Println("otel exporter send record start")
+			klog.Info("otel exporter send record start")
 			e.log.Emit(
 				logs.NewLogRecord(
 					logs.LogRecordConfig{
@@ -72,7 +73,7 @@ func (e *otelExporter) Export() ExportMessageF {
 					},
 				),
 			)
-			fmt.Print("otel exporter send record end,time: ", time.Since(start))
+			klog.Info("otel exporter send record end,time: ", time.Since(start))
 		}
 	}
 }

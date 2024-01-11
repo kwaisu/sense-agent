@@ -4,7 +4,13 @@ import (
 	"context"
 	"time"
 
-	"gitee.com/oschina/sense-agent/pkg/log"
+	"github.com/kwaisu/sense-agent/pkg/log"
+)
+
+type LogExporterType int32
+
+const (
+	Otel LogExporterType = iota - 1
 )
 
 // export messsage call back function

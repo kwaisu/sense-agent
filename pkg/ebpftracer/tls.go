@@ -7,15 +7,16 @@ import (
 	"debug/elf"
 	"errors"
 	"fmt"
+	"os"
+	"regexp"
+	"strings"
+
 	"github.com/cilium/ebpf/link"
-	"github.com/coroot/coroot-node-agent/proc"
+	"github.com/kwaisu/sense-agent/pkg/proc"
 	"golang.org/x/arch/arm64/arm64asm"
 	"golang.org/x/arch/x86/x86asm"
 	"golang.org/x/mod/semver"
 	"k8s.io/klog/v2"
-	"os"
-	"regexp"
-	"strings"
 )
 
 const (
@@ -28,7 +29,7 @@ var (
 	opensslVersionRe = regexp.MustCompile(`OpenSSL\s(\d\.\d+\.\d+)`)
 )
 
-func (t *Tracer) AttachOpenSslUprobes(pid uint32) []link.Link {
+func (t *EbpfTracer) AttachOpenSslUprobes(pid uint32) []link.Link {
 	if t.disableL7Tracing {
 		return nil
 	}
@@ -107,7 +108,7 @@ func (t *Tracer) AttachOpenSslUprobes(pid uint32) []link.Link {
 	return links
 }
 
-func (t *Tracer) AttachGoTlsUprobes(pid uint32) []link.Link {
+func (t *EbpfTracer) AttachGoTlsUprobes(pid uint32) []link.Link {
 	if t.disableL7Tracing {
 		return nil
 	}

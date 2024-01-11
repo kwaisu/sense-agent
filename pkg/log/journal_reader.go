@@ -29,13 +29,13 @@ func NewJournalReader(journalFieldFilter string, journalPath []string) (j *Journ
 		if usage, err := j.journal.GetUsage(); err != nil || usage == 0 {
 			continue
 		}
-		// if err = j.journal.SeekRealtimeUsec(uint64(time.Now().Add(time.Millisecond).UnixNano() / 1000)); err != nil {
-		// 	return nil, err
-		// }
-
-		if err = j.journal.SeekRealtimeUsec(1000); err != nil {
+		if err = j.journal.SeekRealtimeUsec(uint64(time.Now().Add(time.Millisecond).UnixNano() / 1000)); err != nil {
 			return nil, err
 		}
+
+		// if err = j.journal.SeekRealtimeUsec(1000); err != nil {
+		// 	return nil, err
+		// }
 		break
 	}
 	if j.journal == nil {
