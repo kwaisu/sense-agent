@@ -7,9 +7,10 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
-	"github.com/kwaisu/sense-agent/pkg/proc"
 	"inet.af/netaddr"
 	"k8s.io/klog/v2"
+
+	"github.com/kwaisu/sense-agent/pkg/system"
 )
 
 type DockerdClient struct {
@@ -17,9 +18,9 @@ type DockerdClient struct {
 }
 
 func NewDockerd() (ContainerClient, error) {
-	klog.Info(proc.ProcRootSubpath("/run/docker.sock"))
+	klog.Info(system.ProcRootSubpath("/run/docker.sock"))
 	cli, err := client.NewClientWithOpts(
-		client.WithHost("unix://" + proc.ProcRootSubpath("/run/docker.sock")),
+		client.WithHost("unix://" + system.ProcRootSubpath("/run/docker.sock")),
 	)
 	if err != nil {
 		return nil, err

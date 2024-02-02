@@ -9,9 +9,10 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/pkg/cri/constants"
-	"github.com/kwaisu/sense-agent/pkg/kubernetes"
-	"github.com/kwaisu/sense-agent/pkg/proc"
 	"k8s.io/klog"
+
+	"github.com/kwaisu/sense-agent/pkg/kubernetes"
+	"github.com/kwaisu/sense-agent/pkg/system"
 )
 
 var MetadataLabel = "io.cri-containerd.container.metadata"
@@ -35,7 +36,7 @@ func NewContainerd() (ContainerClient, error) {
 	sockets := "/run/containerd/containerd.sock"
 	var addr string
 	klog.Info(addr)
-	cli, err := containerd.New(proc.ProcRootSubpath(sockets),
+	cli, err := containerd.New(system.ProcRootSubpath(sockets),
 		containerd.WithDefaultNamespace(constants.K8sContainerdNamespace),
 		containerd.WithTimeout(time.Second))
 	if err != nil {

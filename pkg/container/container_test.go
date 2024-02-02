@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"k8s.io/klog/v2"
+
+	"github.com/kwaisu/sense-agent/pkg/system"
 )
 
 func TestDocker(t *testing.T) {
@@ -33,8 +35,11 @@ func TestContainerd(t *testing.T) {
 }
 
 func TestNewContainerContext(t *testing.T) {
-	NewContainerContext()
-	for {
+	_, kernelVersion, _ := system.Uname()
+	if ctx, err := NewContainerContext(kernelVersion); err == nil {
+		ctx.ebpftracer.Run()
+		for {
 
+		}
 	}
 }

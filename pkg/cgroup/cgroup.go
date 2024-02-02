@@ -8,10 +8,10 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/kwaisu/sense-agent/pkg/proc"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
-	"k8s.io/klog/v2"
+
+	"github.com/kwaisu/sense-agent/pkg/system"
 )
 
 type Version int
@@ -98,7 +98,7 @@ func InitCgroup() error {
 }
 
 func ReadCgroupByPid(pid uint32) (*Cgroup, error) {
-	return ReadCgroupFromFile(proc.Path(pid, "cgroup"))
+	return ReadCgroupFromFile(system.Path(pid, "cgroup"))
 }
 
 func ReadCgroupFromFile(file string) (*Cgroup, error) {
@@ -125,7 +125,6 @@ func ReadCgroupFromFile(file string) (*Cgroup, error) {
 		cg.Id = cg.subsystems[""]
 		cg.Version = V2
 	}
-	klog.Info(cg.Id)
 	if cg.ContainerType, cg.ContainerId, err = containerByCgroup(cg.Id); err != nil {
 		return nil, err
 	}
@@ -140,6 +139,14 @@ func containerByCgroup(path string) (ContainerType, string, error) {
 	prefix := parts[0]
 	if prefix == "user.slice" || prefix == "init.scope" {
 		return ContainerTypeStandaloneProcess, "", nil
+	}
+	// /system.slice/containerd.service
+	if prefix == "system.slice" || prefix == "runtime.slice" {
+		matches := systemSliceIdRegexp.FindStringSubmatch(path)
+		if matches == nil {
+			return ContainerTypeUnknown, "", fmt.Errorf("invalid systemd cgroup %s", path)
+		}
+		return ContainerTypeSystemdService, matches[1], nil
 	}
 	//docker 9:memory:/system.slice/docker-3b4c4778e0f6640cb1cddd1eddf22638b37ef6e44ce3a6a6264262ccc0353232.scope
 	//8:pids:/docker/ffc408b364e6d265434bf40ec532d8d1380c4ec35d1e0b1494ef8cefa4334d90
@@ -162,12 +169,6 @@ func containerByCgroup(path string) (ContainerType, string, error) {
 		}
 		return ContainerTypeDocker, matches[1], nil
 	}
-	if prefix == "system.slice" || prefix == "runtime.slice" {
-		matches := systemSliceIdRegexp.FindStringSubmatch(path)
-		if matches == nil {
-			return ContainerTypeUnknown, "", fmt.Errorf("invalid systemd cgroup %s", path)
-		}
-		return ContainerTypeSystemdService, matches[1], nil
-	}
+
 	return ContainerTypeUnknown, "", fmt.Errorf("unknown container: %s", path)
 }

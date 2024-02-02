@@ -2,38 +2,66 @@ package container
 
 import (
 	"fmt"
+	"strings"
+
+	"k8s.io/klog/v2"
 
 	"github.com/kwaisu/sense-agent/pkg/cgroup"
 	"github.com/kwaisu/sense-agent/pkg/ebpftracer"
-	"github.com/kwaisu/sense-agent/pkg/proc"
-	"k8s.io/klog/v2"
+	"github.com/kwaisu/sense-agent/pkg/kubernetes"
+	"github.com/kwaisu/sense-agent/pkg/system"
 )
 
 type ContainerContext struct {
 	*ContainerClientProvider
-	containersById       map[ContainerID]*Container
+	containersById       map[string]*Container
 	containersByCgroupId map[string]*Container
 	containersByPid      map[uint32]*Container
 	events               chan ebpftracer.Event
+	ebpftracer           *ebpftracer.EBPFTracer
+	conntrack            *system.Conntrack
 }
 
-func NewContainerContext() (*ContainerContext, error) {
+func NewContainerContext(kernelVersion string) (*ContainerContext, error) {
 	cgroup.InitCgroup()
 	ctx := &ContainerContext{
 		ContainerClientProvider: NewContainerClientProvider(),
 		events:                  make(chan ebpftracer.Event, 10000),
-		containersById:          map[ContainerID]*Container{},
+		containersById:          map[string]*Container{},
 		containersByCgroupId:    map[string]*Container{},
 		containersByPid:         map[uint32]*Container{},
 	}
+	if ebpftracer, err := ebpftracer.NewTracer(kernelVersion); err != nil {
+		klog.Warning(err)
+	} else {
+		ctx.ebpftracer = ebpftracer
+	}
+	if conntrack, err := system.NewHostNetConntrack(); err != nil {
+		return nil, err
+	} else {
+		ctx.conntrack = conntrack
+	}
+	ctx.ebpfEventSubscribe()
 	go ctx.handleEvents(ctx.events)
-	//init container
 	ctx.initContainer(ctx.events)
 	return ctx, nil
 }
 
+func (ctx *ContainerContext) ebpfEventSubscribe() {
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeProcessStart, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeProcessExit, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeConnectionOpen, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeConnectionClose, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeConnectionError, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeListenOpen, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeListenClose, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeFileOpen, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeTCPRetransmit, ctx.events)
+	ctx.ebpftracer.SubscribeEvents(ebpftracer.EventTypeL7Request, ctx.events)
+}
+
 func (ctx *ContainerContext) initContainer(ch chan<- ebpftracer.Event) {
-	pids, err := proc.GetAllPids()
+	pids, err := system.GetAllPids()
 	if err != nil {
 		klog.Warning(fmt.Errorf("failed to list pids: %w", err))
 	}
@@ -49,16 +77,35 @@ func (ctx *ContainerContext) handleEvents(ch <-chan ebpftracer.Event) {
 			if !more {
 				return
 			}
-			klog.Info(event.Type)
 			switch event.Type {
 			case ebpftracer.EventTypeProcessStart:
-				ctx.getContainer(event.Pid)
+				ctx.createContainer(event.Pid)
+			case ebpftracer.EventTypeProcessExit:
+				if c, exists := ctx.containersByPid[event.Pid]; exists {
+					delete(ctx.containersByCgroupId, c.Cgroup.Id)
+					delete(ctx.containersById, c.ContainerID)
+					delete(ctx.containersByPid, event.Pid)
+				}
+			case ebpftracer.EventTypeConnectionOpen:
+				// if c, _ := ctx.containersByPid[event.Pid]; c != nil {
+				// 	klog.Infof("contianer: %s, pid = %d,Fd = %d, srcadd = %s, destaddr =  %s,Timestamp =  %d", c.Metadata.Name, event.Pid, event.Fd, event.SrcAddr.IP().String(), event.DstAddr.IP().String(), event.Timestamp)
+				// 	// 	actualDst := ctx.conntrack.GetActualDestination(event.SrcAddr, event.DstAddr)
+				// 	// 	if actualDst != nil {
+				// 	// 		klog.Warningf("cannot open NetNs for pid %d ", event.Pid)
+				// 	// 		return
+				// 	// 	}
+				// } else {
+				// 	klog.Infoln("TCP connection from unknown container", event)
+				// }
+
+			case ebpftracer.EventTypeL7Request:
+
 			}
 		}
 	}
 }
 
-func (ctx *ContainerContext) getContainer(pid uint32) *Container {
+func (ctx *ContainerContext) createContainer(pid uint32) *Container {
 	if container, ok := ctx.containersByPid[pid]; ok {
 		return container
 	}
@@ -76,21 +123,7 @@ func (ctx *ContainerContext) getContainer(pid uint32) *Container {
 			klog.Warningf("failed to get container metadata for pid %d -> %s: %s", pid, cg.Id, err)
 			return nil
 		} else {
-			var id ContainerID
-			if metadata.Labels["io.kubernetes.pod.name"] != "" {
-				pod := metadata.Labels["io.kubernetes.pod.name"]
-				namespace := metadata.Labels["io.kubernetes.pod.namespace"]
-				name := metadata.Labels["io.kubernetes.container.name"]
-				if cg.ContainerType == cgroup.ContainerTypeSandbox {
-					name = "sandbox"
-				}
-				if name == "" || name == "POD" { // skip pause containers
-					id = ""
-				}
-				id = ContainerID(fmt.Sprintf("/k8s/%s/%s/%s", namespace, pod, name))
-			}
-
-			klog.Infof("calculated container id %d -> %s -> %s", pid, cg.Id, id)
+			id := getContainerID(cg, metadata)
 			if id == "" {
 				if cg.Id == "/init.scope" && pid != 1 {
 					klog.InfoS("ignoring without persisting", "cg", cg.Id, "pid", pid)
@@ -100,25 +133,46 @@ func (ctx *ContainerContext) getContainer(pid uint32) *Container {
 				}
 				return nil
 			}
-			// if c := ctx.containersById[id]; c != nil {
-			// 	klog.Warningln("id conflict:", id)
-			// 	if cg.CreatedAt().After(c.cgroup.CreatedAt()) {
-			// 		c.cgroup = cg
-			// 		c.metadata = md
-			// 		c.runLogParser("")
-			// 		if c.nsConntrack != nil {
-			// 			_ = c.nsConntrack.Close()
-			// 			c.nsConntrack = nil
-			// 		}
-			// 	}
-			// 	r.containersByPid[pid] = c
-			// 	r.containersByCgroupId[cg.Id] = c
-			// 	return c
-			// }
-
+			if c, err := ctx.NewContainer(id, cg, pid); err != nil {
+				if err != nil {
+					klog.Warningf("failed to create container pid=%d cg=%s id=%s: %s", pid, cg.Id, id, err)
+					return nil
+				}
+			} else {
+				klog.InfoS("container:", "pid", pid, "cg", cg.Id, "id", id)
+				ctx.containersByPid[pid] = c
+				ctx.containersByCgroupId[cg.Id] = c
+				ctx.containersById[id] = c
+			}
 		}
-
 	}
-
 	return nil
+}
+
+func getContainerID(cg *cgroup.Cgroup, meta *ContainerMetadata) string {
+	if cg.ContainerType == cgroup.ContainerTypeSystemdService {
+		if strings.HasPrefix(cg.ContainerId, "/system.slice/crio-conmon-") {
+			return ""
+		}
+		return cg.ContainerId
+	}
+	if cg.ContainerId == "" {
+		return ""
+	}
+	if cg.ContainerType != cgroup.ContainerTypeDocker && cg.ContainerType != cgroup.ContainerTypeContainerd && cg.ContainerType != cgroup.ContainerTypeSandbox {
+		return ""
+	}
+	if meta.Labels[kubernetes.KUBERNETES_LABEL_PODNAME] != "" {
+		pod := meta.Labels[kubernetes.KUBERNETES_LABEL_PODNAME]
+		namespace := meta.Labels[kubernetes.KUBERNETES_LABEL_NAMESPACE]
+		name := meta.Labels[kubernetes.KUBERNETES_LABEL_CONTAINER_NAME]
+		if cg.ContainerType == cgroup.ContainerTypeSandbox {
+			name = "sandbox"
+		}
+		if name == "" || name == "POD" { // skip pause containers
+			return ""
+		}
+		return fmt.Sprintf("/k8s/%s/%s/%s", namespace, pod, name)
+	}
+	return ""
 }

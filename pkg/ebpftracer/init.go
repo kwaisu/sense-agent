@@ -3,8 +3,9 @@ package ebpftracer
 import (
 	"strings"
 
-	"github.com/kwaisu/sense-agent/pkg/proc"
 	"k8s.io/klog/v2"
+
+	"github.com/kwaisu/sense-agent/pkg/system"
 )
 
 type file struct {
@@ -15,13 +16,13 @@ type file struct {
 type sock struct {
 	pid uint32
 	fd  uint64
-	proc.Sock
+	system.Sock
 }
 
 func readFds(pids []uint32) (files []file, socks []sock) {
 	nss := map[string]map[string]sock{}
 	for _, pid := range pids {
-		ns, err := proc.GetNetNs(pid)
+		ns, err := system.GetNetNs(pid)
 		if err != nil {
 			continue
 		}
@@ -31,7 +32,7 @@ func readFds(pids []uint32) (files []file, socks []sock) {
 		if !ok {
 			sockets = map[string]sock{}
 			nss[nsId] = sockets
-			if ss, err := proc.GetSockets(pid); err != nil {
+			if ss, err := system.GetSockets(pid); err != nil {
 				klog.Warningln(err)
 			} else {
 				for _, s := range ss {
@@ -40,7 +41,7 @@ func readFds(pids []uint32) (files []file, socks []sock) {
 			}
 		}
 
-		fds, err := proc.ReadFds(pid)
+		fds, err := system.ReadFds(pid)
 		if err != nil {
 			continue
 		}

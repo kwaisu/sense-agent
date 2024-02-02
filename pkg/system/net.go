@@ -1,13 +1,14 @@
-package proc
+package system
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
-	"inet.af/netaddr"
 	"net"
 	"os"
+
+	"inet.af/netaddr"
 )
 
 const (

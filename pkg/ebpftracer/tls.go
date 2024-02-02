@@ -12,11 +12,12 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf/link"
-	"github.com/kwaisu/sense-agent/pkg/proc"
 	"golang.org/x/arch/arm64/arm64asm"
 	"golang.org/x/arch/x86/x86asm"
 	"golang.org/x/mod/semver"
 	"k8s.io/klog/v2"
+
+	"github.com/kwaisu/sense-agent/pkg/system"
 )
 
 const (
@@ -29,7 +30,7 @@ var (
 	opensslVersionRe = regexp.MustCompile(`OpenSSL\s(\d\.\d+\.\d+)`)
 )
 
-func (t *EbpfTracer) AttachOpenSslUprobes(pid uint32) []link.Link {
+func (t *EBPFTracer) AttachOpenSslUprobes(pid uint32) []link.Link {
 	if t.disableL7Tracing {
 		return nil
 	}
@@ -108,12 +109,12 @@ func (t *EbpfTracer) AttachOpenSslUprobes(pid uint32) []link.Link {
 	return links
 }
 
-func (t *EbpfTracer) AttachGoTlsUprobes(pid uint32) []link.Link {
+func (t *EBPFTracer) AttachGoTlsUprobes(pid uint32) []link.Link {
 	if t.disableL7Tracing {
 		return nil
 	}
 
-	path := proc.Path(pid, "exe")
+	path := system.Path(pid, "exe")
 
 	var err error
 	var name, version string
@@ -247,7 +248,7 @@ func (t *EbpfTracer) AttachGoTlsUprobes(pid uint32) []link.Link {
 }
 
 func getSslLibPathAndVersion(pid uint32) (string, string) {
-	f, err := os.Open(proc.Path(pid, "maps"))
+	f, err := os.Open(system.Path(pid, "maps"))
 	if err != nil {
 		return "", ""
 	}
@@ -263,12 +264,12 @@ func getSslLibPathAndVersion(pid uint32) (string, string) {
 		libPath := parts[5]
 		switch {
 		case libsslPath == "" && strings.Contains(libPath, "libssl.so"):
-			fullPath := proc.Path(pid, "root", libPath)
+			fullPath := system.Path(pid, "root", libPath)
 			if _, err = os.Stat(fullPath); err == nil {
 				libsslPath = fullPath
 			}
 		case libcryptoPath == "" && strings.Contains(libPath, "libcrypto.so"):
-			fullPath := proc.Path(pid, "root", libPath)
+			fullPath := system.Path(pid, "root", libPath)
 			if _, err = os.Stat(fullPath); err == nil {
 				libcryptoPath = fullPath
 			}

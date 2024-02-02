@@ -2,45 +2,46 @@ package ebpftracer
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
-	"github.com/kwaisu/sense-agent/pkg/proc"
 	"golang.org/x/mod/semver"
+	"inet.af/netaddr"
+	"k8s.io/klog/v2"
+
+	"github.com/kwaisu/sense-agent/pkg/ebpftracer/l7"
+	"github.com/kwaisu/sense-agent/pkg/system"
 )
 
-type EbpfTracer struct {
+const MaxPayloadSize = 1024
+
+type EBPFTracer struct {
 	collection       *ebpf.Collection
-	readers          map[string]*perf.Reader
+	readers          map[string]*perfReader
 	links            []link.Link
 	uprobes          map[string]*ebpf.Program
 	disableL7Tracing bool
-	subscribers      map[string]chan<- Event
+	subscribers      map[EventType][]chan Event
 	lock             sync.Mutex
 }
-type PerfMap struct {
-	name             string
-	perCPUBufferSize int
+type perfReader struct {
+	*perf.Reader
+	perfEventMap
 }
 
-var perfEventMap = []PerfMap{
-	{name: "proc_events", perCPUBufferSize: 4},
-	{name: "tcp_listen_events", perCPUBufferSize: 4},
-	{name: "tcp_connect_events", perCPUBufferSize: 8},
-	{name: "tcp_retransmit_events", perCPUBufferSize: 4},
-	{name: "file_events", perCPUBufferSize: 4}}
-
-func NewTracer(kernelVersion string) (*EbpfTracer, error) {
-	trace := &EbpfTracer{
-		readers:     map[string]*perf.Reader{},
+func NewTracer(kernelVersion string) (*EBPFTracer, error) {
+	trace := &EBPFTracer{
+		readers:     map[string]*perfReader{},
 		uprobes:     map[string]*ebpf.Program{},
-		subscribers: map[string]chan<- Event{},
+		subscribers: map[EventType][]chan Event{},
 	}
 	if prog, err := getProgram(kernelVersion); err != nil {
 		return nil, err
@@ -73,19 +74,20 @@ func NewTracer(kernelVersion string) (*EbpfTracer, error) {
 				}
 			}
 		}
-		for _, pe := range perfEventMap {
-			reader, err := perf.NewReader(collection.Maps[pe.name], pe.perCPUBufferSize)
+		for _, pe := range perfEvenMaps {
+			reader, err := perf.NewReader(collection.Maps[string(pe.name)], pe.perCPUBufferSize)
 			if err != nil {
 				reader.Close()
 				return nil, fmt.Errorf("failed to new  %s perfEvent Reader ", pe.name)
 			}
-			trace.readers[pe.name] = reader
+			trace.readers[string(pe.name)] = &perfReader{Reader: reader, perfEventMap: pe}
 		}
 	}
 
 	return trace, nil
 }
-func (t *EbpfTracer) Close() {
+
+func (t *EBPFTracer) Close() {
 	for _, p := range t.uprobes {
 		_ = p.Close()
 	}
@@ -103,7 +105,7 @@ func getProgram(kernelVersion string) ([]byte, error) {
 		return nil, fmt.Errorf("Unsupported  architecture: %s  ", runtime.GOARCH)
 	}
 	var prg []byte
-	kv := "v" + proc.KernelMajorMinor(kernelVersion)
+	kv := "v" + system.KernelMajorMinor(kernelVersion)
 	for _, p := range ebpfProg[runtime.GOARCH] {
 		if semver.Compare(kv, p.v) >= 0 {
 			prg = p.p
@@ -118,20 +120,103 @@ func getProgram(kernelVersion string) ([]byte, error) {
 	}
 	return prg, nil
 }
-func (t *EbpfTracer) Reader() {
 
+func (t *EBPFTracer) Reader(perfReader *perfReader) {
+	for {
+		record, err := perfReader.Read()
+		if err != nil {
+			klog.Info("perf reader read error :", err)
+			continue
+		}
+		if record.LostSamples > 0 {
+			klog.Errorf(" %s lost samples: %d", perfReader.name, record.LostSamples)
+			continue
+		}
+		var event Event
+		switch perfReader.typ {
+		case perfMapTypeL7Events:
+			v := &l7Event{}
+			reader := bytes.NewBuffer(record.RawSample)
+			if err := binary.Read(reader, binary.LittleEndian, v); err != nil {
+				klog.Warningln("failed to read msg:", err)
+				continue
+			}
+			payload := reader.Bytes()
+			req := &l7.RequestData{
+				Protocol:    l7.Protocol(v.Protocol),
+				Status:      l7.Status(v.Status),
+				Duration:    time.Duration(v.Duration),
+				Method:      l7.Method(v.Method),
+				StatementId: v.StatementId,
+			}
+			switch {
+			case v.PayloadSize == 0:
+			case v.PayloadSize > MaxPayloadSize:
+				req.Payload = payload[:MaxPayloadSize]
+			default:
+				req.Payload = payload[:v.PayloadSize]
+			}
+			if strings.Index(string(req.Payload), "CUPS/2.4.1") < 0 {
+				event = Event{Type: EventTypeL7Request, Pid: v.Pid, Fd: v.Fd, Timestamp: v.ConnectionTimestamp, L7Request: req}
+			}
+		case perfMapTypeFileEvents:
+			v := &fileEvent{}
+			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, v); err != nil {
+				klog.Warningln("failed to read msg:", err)
+				continue
+			}
+			event = Event{Type: v.Type, Pid: v.Pid, Fd: v.Fd}
+		case perfMapTypeProcEvents:
+			v := &procEvent{}
+			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, v); err != nil {
+				klog.Warningln("failed to read msg:", err)
+				continue
+			}
+			event = Event{Type: v.Type, Reason: EventReason(v.Reason), Pid: v.Pid}
+		case perfMapTypeTCPEvents:
+			v := &tcpEvent{}
+			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, v); err != nil {
+				klog.Warningln("failed to read msg:", err)
+				continue
+			}
+			event = Event{
+				Type:      v.Type,
+				Pid:       v.Pid,
+				SrcAddr:   ipPort(v.SAddr, v.SPort),
+				DstAddr:   ipPort(v.DAddr, v.DPort),
+				Fd:        v.Fd,
+				Timestamp: v.Timestamp,
+			}
+		default:
+			continue
+		}
+		if eventsChan, ok := t.subscribers[event.Type]; ok {
+			for _, ch := range eventsChan {
+				ch <- event
+			}
+		}
+
+	}
 }
 
-func (t *EbpfTracer) Subscribe(name string, ch chan<- Event) error {
+func (t *EBPFTracer) SubscribeEvents(eventType EventType, ch chan Event) error {
 	t.lock.Lock()
 	defer t.lock.Unlock()
-	if _, ok := t.subscribers[name]; ok {
-		return fmt.Errorf("duplicate subscriber for group %s", name)
+	if eventsCh, ok := t.subscribers[eventType]; ok {
+		t.subscribers[eventType] = append(eventsCh, ch)
+	} else {
+		t.subscribers[eventType] = []chan Event{ch}
 	}
-	t.subscribers[name] = ch
 	return nil
 }
 
-func (t *EbpfTracer) Run() {
+func (t *EBPFTracer) Run() {
+	for _, reader := range t.readers {
+		go t.Reader(reader)
+	}
+}
 
+func ipPort(ip [16]byte, port uint16) netaddr.IPPort {
+	i, _ := netaddr.FromStdIP(ip[:])
+	return netaddr.IPPortFrom(i, port)
 }
