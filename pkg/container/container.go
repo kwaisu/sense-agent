@@ -22,6 +22,7 @@ type ContainerContext struct {
 	conntrack            *system.Conntrack
 }
 
+// create containercontext
 func NewContainerContext(kernelVersion string) (*ContainerContext, error) {
 	cgroup.InitCgroup()
 	ctx := &ContainerContext{
@@ -87,19 +88,20 @@ func (ctx *ContainerContext) handleEvents(ch <-chan ebpftracer.Event) {
 					delete(ctx.containersByPid, event.Pid)
 				}
 			case ebpftracer.EventTypeConnectionOpen:
-				// if c, _ := ctx.containersByPid[event.Pid]; c != nil {
-				// 	klog.Infof("contianer: %s, pid = %d,Fd = %d, srcadd = %s, destaddr =  %s,Timestamp =  %d", c.Metadata.Name, event.Pid, event.Fd, event.SrcAddr.IP().String(), event.DstAddr.IP().String(), event.Timestamp)
-				// 	// 	actualDst := ctx.conntrack.GetActualDestination(event.SrcAddr, event.DstAddr)
-				// 	// 	if actualDst != nil {
-				// 	// 		klog.Warningf("cannot open NetNs for pid %d ", event.Pid)
-				// 	// 		return
-				// 	// 	}
-				// } else {
-				// 	klog.Infoln("TCP connection from unknown container", event)
-				// }
-
+				if c, ok := ctx.containersByPid[event.Pid]; c != nil && ok {
+					c.OnConnectionOpen(event.SrcAddr, event.DstAddr, event.Pid, event.Fd, event.Timestamp, false)
+				}
+			case ebpftracer.EventTypeConnectionError:
+				if c, ok := ctx.containersByPid[event.Pid]; c != nil && ok {
+					c.OnConnectionOpen(event.SrcAddr, event.DstAddr, event.Pid, event.Fd, 0, true)
+				}
 			case ebpftracer.EventTypeL7Request:
-
+				if event.L7Request == nil {
+					continue
+				}
+				if c, ok := ctx.containersByPid[event.Pid]; c != nil && ok {
+					c.OnL7Request(event.Pid, event.Fd, event.Timestamp, event.L7Request)
+				}
 			}
 		}
 	}
@@ -125,7 +127,7 @@ func (ctx *ContainerContext) createContainer(pid uint32) *Container {
 		} else {
 			id := getContainerID(cg, metadata)
 			if id == "" {
-				if cg.Id == "/init.scope" && pid != 1 {
+				if cg.Id == "/init.scope" && pid != 1 { //ignoring initcontianer
 					klog.InfoS("ignoring without persisting", "cg", cg.Id, "pid", pid)
 				} else {
 					klog.InfoS("ignoring", "cg", cg.Id, "pid", pid)
@@ -133,7 +135,7 @@ func (ctx *ContainerContext) createContainer(pid uint32) *Container {
 				}
 				return nil
 			}
-			if c, err := ctx.NewContainer(id, cg, pid); err != nil {
+			if c, err := ctx.NewContainer(id, metadata, cg, pid, ctx.conntrack); err != nil {
 				if err != nil {
 					klog.Warningf("failed to create container pid=%d cg=%s id=%s: %s", pid, cg.Id, id, err)
 					return nil
